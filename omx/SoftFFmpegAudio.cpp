@@ -75,12 +75,8 @@ SoftFFmpegAudio::SoftFFmpegAudio(
 
     setAudioClock(0);
 
-    char value[PROPERTY_VALUE_MAX] = {0};
-    property_get("audio.offload.24bit.enable", value, "1");
-    mHighResAudioEnabled = atoi(value);
-
-    ALOGD("SoftFFmpegAudio component: %s mCodingType: %d mHighResAudioEnabled: %d",
-            name, mCodingType, mHighResAudioEnabled);
+    ALOGD("SoftFFmpegAudio component: %s mCodingType: %d",
+            name, mCodingType);
 
     initPorts();
     CHECK_EQ(initDecoder(codecID), (status_t)OK);
@@ -280,9 +276,17 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalGetParameter(
             profile->ePCMMode = OMX_AUDIO_PCMModeLinear;
 
             if (isConfigured()) {
-                profile->nBitPerSample = av_get_bytes_per_sample(mAudioTgtFmt) > 2 ? 24 : 16;
+                AVSampleFormat packed = av_get_packed_sample_fmt(mAudioTgtFmt);
+                if (packed == AV_SAMPLE_FMT_U8)
+                    profile->nBitPerSample = 8;
+                else if (packed == AV_SAMPLE_FMT_S16)
+                    profile->nBitPerSample = 16;
+                else if (packed == AV_SAMPLE_FMT_S32)
+                    profile->nBitPerSample = 24;
+                else
+                    profile->nBitPerSample = av_get_bytes_per_sample(mAudioTgtFmt) * 8;
             } else {
-                profile->nBitPerSample = mHighResAudioEnabled ? 24 : 16;
+                profile->nBitPerSample = 32;
             }
 
             if (getOMXChannelMapping(mAudioTgtChannels, profile->eChannelMapping) != OK) {
@@ -293,7 +297,7 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalGetParameter(
             profile->nSamplingRate = mAudioTgtFreq;
 
             //mCtx has been updated(adjustAudioParams)!
-            ALOGV("get pcm params, nChannels:%lu, nSamplingRate:%lu, nBitsPerSample:%lu",
+            ALOGV("get pcm params, nChannels:%u, nSamplingRate:%u, nBitsPerSample:%u",
                    profile->nChannels, profile->nSamplingRate, profile->nBitPerSample);
 
             return OMX_ErrorNone;
@@ -539,20 +543,13 @@ OMX_ERRORTYPE SoftFFmpegAudio::isRoleSupported(
 
 void SoftFFmpegAudio::adjustAudioParams() {
 
-    uint32_t max_rate = 48000;
-
     mReconfiguring = isConfigured();
 
     // let android audio mixer to downmix if there is no multichannel output
     // and use number of channels from the source file, useful for HDMI/offload output
     mAudioTgtChannels = mCtx->channels;
 
-    // 4000 <= sampling rate <= 48000/192000
-    if (mHighResAudioEnabled) {
-        max_rate = 192000;
-    }
-
-    mAudioTgtFreq = FFMIN(max_rate, FFMAX(8000, mCtx->sample_rate));
+    mAudioTgtFreq = FFMIN(192000, FFMAX(8000, mCtx->sample_rate));
 
     mAudioTgtChannels = mCtx->channels;
     mAudioTgtFreq = mCtx->sample_rate;
@@ -583,9 +580,12 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
                 return OMX_ErrorUndefined;
             }
 
-            if (mHighResAudioEnabled &&
-                    (profile->nBitPerSample > 16 || profile->nBitPerSample == 0)) {
+            if (profile->nBitPerSample == 24) {
                 mAudioTgtFmt = AV_SAMPLE_FMT_S32;
+            } else if (profile->nBitPerSample == 32) {
+                mAudioTgtFmt = AV_SAMPLE_FMT_FLT;
+            } else if (profile->nBitPerSample == 8) {
+                mAudioTgtFmt = AV_SAMPLE_FMT_U8;
             } else {
                 mAudioTgtFmt = AV_SAMPLE_FMT_S16;
             }
@@ -593,8 +593,8 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
             mAudioTgtFreq = profile->nSamplingRate;
             mAudioTgtChannels = profile->nChannels;
 
-            ALOGV("set OMX_IndexParamAudioPcm, nChannels:%lu, "
-                    "nSampleRate:%lu, nBitsPerSample:%lu",
+            ALOGV("set OMX_IndexParamAudioPcm, nChannels:%u, "
+                    "nSampleRate:%u, nBitsPerSample:%u",
                 profile->nChannels, profile->nSamplingRate,
                 profile->nBitPerSample);
 
@@ -615,7 +615,7 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
 
             adjustAudioParams();
 
-            ALOGV("set OMX_IndexParamAudioAac, nChannels:%lu, nSampleRate:%lu",
+            ALOGV("set OMX_IndexParamAudioAac, nChannels:%u, nSampleRate:%u",
                 profile->nChannels, profile->nSampleRate);
 
             return OMX_ErrorNone;
@@ -635,7 +635,7 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
 
             adjustAudioParams();
 
-            ALOGV("set OMX_IndexParamAudioMp3, nChannels:%lu, nSampleRate:%lu",
+            ALOGV("set OMX_IndexParamAudioMp3, nChannels:%u, nSampleRate:%u",
                 profile->nChannels, profile->nSampleRate);
 
             return OMX_ErrorNone;
@@ -656,8 +656,8 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
             adjustAudioParams();
 
             ALOGD("set OMX_IndexParamAudioVorbis, "
-                    "nChannels=%lu, nSampleRate=%lu, nBitRate=%lu, "
-                    "nMinBitRate=%lu, nMaxBitRate=%lu",
+                    "nChannels=%u, nSampleRate=%u, nBitRate=%u, "
+                    "nMinBitRate=%u, nMaxBitRate=%u",
                 profile->nChannels, profile->nSampleRate,
                 profile->nBitRate, profile->nMinBitRate,
                 profile->nMaxBitRate);
@@ -695,7 +695,7 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
             adjustAudioParams();
 
             ALOGV("set OMX_IndexParamAudioWma, nChannels:%u, "
-                    "nSampleRate:%lu, nBitRate:%lu, nBlockAlign:%u",
+                    "nSampleRate:%u, nBitRate:%u, nBlockAlign:%u",
                 profile->nChannels, profile->nSamplingRate,
                 profile->nBitRate, profile->nBlockAlign);
 
@@ -720,8 +720,8 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
 
             adjustAudioParams();
 
-            ALOGV("set OMX_IndexParamAudioRa, nChannels:%lu, "
-                    "nSampleRate:%lu, nBlockAlign:%d",
+            ALOGV("set OMX_IndexParamAudioRa, nChannels:%u, "
+                    "nSampleRate:%u, nBlockAlign:%d",
                 profile->nChannels, profile->nSamplingRate, mCtx->block_align);
 
             return OMX_ErrorNone;
@@ -741,7 +741,7 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
 
             adjustAudioParams();
 
-            ALOGV("set OMX_IndexParamAudioFlac, nChannels:%lu, nSampleRate:%lu ",
+            ALOGV("set OMX_IndexParamAudioFlac, nChannels:%u, nSampleRate:%u ",
                 profile->nChannels, profile->nSampleRate);
 
             return OMX_ErrorNone;
@@ -761,7 +761,7 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
 
             adjustAudioParams();
 
-            ALOGV("set OMX_IndexParamAudioMp2, nChannels:%lu, nSampleRate:%lu",
+            ALOGV("set OMX_IndexParamAudioMp2, nChannels:%u, nSampleRate:%u",
                 profile->nChannels, profile->nSampleRate);
 
             return OMX_ErrorNone;
@@ -781,7 +781,7 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
 
             adjustAudioParams();
 
-            ALOGV("set OMX_IndexParamAudioAc3, nChannels:%lu, nSampleRate:%lu",
+            ALOGV("set OMX_IndexParamAudioAc3, nChannels:%u, nSampleRate:%u",
                 profile->nChannels, profile->nSamplingRate);
 
             return OMX_ErrorNone;
@@ -801,7 +801,7 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
 
             adjustAudioParams();
 
-            ALOGV("set OMX_IndexParamAudioAndroidAc3, nChannels:%lu, nSampleRate:%lu",
+            ALOGV("set OMX_IndexParamAudioAndroidAc3, nChannels:%u, nSampleRate:%u",
                 profile->nChannels, profile->nSampleRate);
 
             return OMX_ErrorNone;
@@ -823,8 +823,8 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
 
             adjustAudioParams();
 
-            ALOGV("set OMX_IndexParamAudioApe, nChannels:%lu, "
-                    "nSampleRate:%lu, nBitsPerSample:%lu",
+            ALOGV("set OMX_IndexParamAudioApe, nChannels:%u, "
+                    "nSampleRate:%u, nBitsPerSample:%u",
                 profile->nChannels, profile->nSamplingRate,
                 profile->nBitsPerSample);
 
@@ -845,7 +845,7 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
 
             adjustAudioParams();
 
-            ALOGV("set OMX_IndexParamAudioDts, nChannels:%lu, nSampleRate:%lu",
+            ALOGV("set OMX_IndexParamAudioDts, nChannels:%u, nSampleRate:%u",
                 profile->nChannels, profile->nSamplingRate);
 
             return OMX_ErrorNone;
@@ -871,9 +871,9 @@ OMX_ERRORTYPE SoftFFmpegAudio::internalSetParameter(
             adjustAudioParams();
 
             ALOGD("set OMX_IndexParamAudioFFmpeg, "
-                "eCodecId:%ld(%s), nChannels:%lu, nBitRate:%lu, "
-                "nBitsPerSample:%lu, nSampleRate:%lu, "
-                "nBlockAlign:%lu, eSampleFormat:%lu(%s)",
+                "eCodecId:%d(%s), nChannels:%u, nBitRate:%u, "
+                "nBitsPerSample:%u, nSampleRate:%u, "
+                "nBlockAlign:%u, eSampleFormat:%u(%s)",
                 profile->eCodecId, avcodec_get_name(mCtx->codec_id),
                 profile->nChannels, profile->nBitRate,
                 profile->nBitsPerSample, profile->nSampleRate,
@@ -921,12 +921,12 @@ int32_t SoftFFmpegAudio::handleExtradata() {
     BufferInfo *inInfo = *inQueue.begin();
     OMX_BUFFERHEADERTYPE *inHeader = inInfo->mHeader;
 
-    ALOGI("got extradata, ignore: %d, size: %lu",
+    ALOGI("got extradata, ignore: %d, size: %u",
             mIgnoreExtradata, inHeader->nFilledLen);
     hexdump(inHeader->pBuffer + inHeader->nOffset, inHeader->nFilledLen);
 
     if (mIgnoreExtradata) {
-        ALOGI("got extradata, size: %lu, but ignore it", inHeader->nFilledLen);
+        ALOGI("got extradata, size: %u, but ignore it", inHeader->nFilledLen);
     } else {
         if (!mExtradataReady) {
             uint32_t ret = ERR_OK;
@@ -1430,7 +1430,7 @@ void SoftFFmpegAudio::onQueueFilled(OMX_U32 /* portIndex */) {
 }
 
 void SoftFFmpegAudio::onPortFlushCompleted(OMX_U32 portIndex) {
-    ALOGV("ffmpeg audio decoder flush port(%lu)", portIndex);
+    ALOGV("ffmpeg audio decoder flush port(%u)", portIndex);
     if (portIndex == kInputPortIndex) {
         if (mCtx && mCtx->codec) {
             //Make sure that the next buffer output does not still
